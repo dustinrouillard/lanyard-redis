@@ -279,9 +279,11 @@ Lanyard can disconnect clients for multiple reasons, usually to do with messages
 
 #### Types of Errors
 
-| Name                   | Code | Data             |
-| ---------------------- | ---- | ---------------- |
-| Invalid/Unknown Opcode | 4004 | `unknown_opcode` |
+| Name                   | Code | Data                   |
+| ---------------------- | ---- | ---------------------- |
+| Invalid/Unknown Opcode | 4004 | `unknown_opcode`       |
+| Opcode Requires Data   | 4005 | `requires_data_object` |
+| Invalid Payload        | 4006 | `invalid_payload`      |
 
 ## Quicklinks
 
@@ -417,6 +419,13 @@ Below is a list of sites using Lanyard right now, check them out! A lot of them 
 - [eleven.js.org](https://eleven.js.org)
 - [roxza.me](https://roxza.me)
 - [keaton.codes](https://keaton.codes)
+- [itsmebravo.dev](https://itsmebravo.dev)
+- [cimok.co.uk](https://cimok.co.uk/)
+- [winnerose.live](https://winnerose.live/)
+- [alysum.vercel.app](https://alysum.vercel.app/)
+- [alpha.is-a.dev](https://alpha.is-a.dev)
+- [rovi.me](https://rovi.me)
+- [snazzah.com](https://snazzah.com)
 
 ## Todo
 

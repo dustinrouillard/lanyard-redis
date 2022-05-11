@@ -31,6 +31,8 @@ defmodule Lanyard.SocketHandler do
   end
 
   def websocket_init(state) do
+    Lanyard.Metrics.Collector.inc(:gauge, :lanyard_connected_sessions)
+
     {:reply,
      construct_socket_msg(state.compression, %{op: 1, d: %{"heartbeat_interval" => 30000}}),
      state}
@@ -41,76 +43,93 @@ defmodule Lanyard.SocketHandler do
   end
 
   def websocket_handle({_type, json}, state) do
-    with {:ok, json} <- Poison.decode(json) do
-      case json["op"] do
-        2 ->
-          init_state =
-            case json["d"] do
-              %{"subscribe_to_ids" => ids} ->
-                Logger.debug(
-                  "Sockets | Socket initialized and subscribed to list: #{inspect(ids)}"
-                )
+    Lanyard.Metrics.Collector.inc(:counter, :lanyard_messages_inbound)
 
-                Presence.subscribe_to_ids_and_build(ids)
-
-              %{"subscribe_to_id" => id} ->
-                case GenRegistry.lookup(Lanyard.Presence, id) do
-                  {:ok, pid} ->
-                    {:ok, raw_data} = Presence.get_presence(id)
-                    {_, presence} = Presence.build_pretty_presence(raw_data)
-
-                    send(pid, {:add_subscriber, self()})
-
+    case Poison.decode(json) do
+      {:ok, json} when is_map(json) ->
+        case json["op"] do
+          2 ->
+            if json["d"] == nil || !is_map(json["d"]) || map_size(json["d"]) == 0 do
+              {:reply, {:close, 4005, "requires_data_object"}, state}
+            else
+              init_state =
+                case json["d"] do
+                  %{"subscribe_to_ids" => ids} ->
                     Logger.debug(
-                      "Sockets | Socket initialized and subscribed to singleton: #{id}"
+                      "Sockets | Socket initialized and subscribed to list: #{inspect(ids)}"
                     )
 
-                    presence
+                    Presence.subscribe_to_ids_and_build(ids)
+
+                  %{"subscribe_to_id" => id} ->
+                    case GenRegistry.lookup(Lanyard.Presence, id) do
+                      {:ok, pid} ->
+                        {:ok, raw_data} = Presence.get_presence(id)
+                        {_, presence} = Presence.build_pretty_presence(raw_data)
+
+                        send(pid, {:add_subscriber, self()})
+
+                        Logger.debug(
+                          "Sockets | Socket initialized and subscribed to singleton: #{id}"
+                        )
+
+                        presence
+
+                      _ ->
+                        %{}
+                    end
+
+                  %{"subscribe_to_all" => true} ->
+                    ids =
+                      GenRegistry.reduce(Lanyard.Presence, [], fn {id, _pid}, acc ->
+                        [id | acc]
+                      end)
+
+                    :ets.insert(
+                      :global_subscribers,
+                      {"subscribers", [self() | get_global_subscriber_list()]}
+                    )
+
+                    Process.flag(:trap_exit, true)
+
+                    Presence.subscribe_to_ids_and_build(ids)
 
                   _ ->
-                    %{}
+                    nil
                 end
 
-              %{"subscribe_to_all" => true} ->
-                ids =
-                  GenRegistry.reduce(Lanyard.Presence, [], fn {id, _pid}, acc ->
-                    [id | acc]
-                  end)
-
-                :ets.insert(
-                  :global_subscribers,
-                  {"subscribers", [self() | get_global_subscriber_list()]}
-                )
-
-                Process.flag(:trap_exit, true)
-
-                Presence.subscribe_to_ids_and_build(ids)
+              if init_state == nil do
+                {:reply, {:close, 4006, "invalid_payload"}, state}
+              else
+                {:reply,
+                 construct_socket_msg(state.compression, %{op: 0, t: "INIT_STATE", d: init_state}),
+                 state}
+              end
             end
 
-          {:reply,
-           construct_socket_msg(state.compression, %{op: 0, t: "INIT_STATE", d: init_state}),
-           state}
+          # Used for heartbeating
+          3 ->
+            {:ok, state}
 
-        # Used for heartbeating
-        3 ->
-          {:ok, state}
+          # Unsubscribe
+          4 ->
+            case json["d"] do
+              %{"unsubscribe_from_id" => id} ->
+                {:ok, pid} = GenRegistry.lookup(Lanyard.Presence, id)
 
-        # Unsubscribe
-        4 ->
-          case json["d"] do
-            %{"unsubscribe_from_id" => id} ->
-              {:ok, pid} = GenRegistry.lookup(Lanyard.Presence, id)
+                unless not Process.alive?(pid) do
+                  send(pid, {:remove_subscriber, pid})
+                end
+            end
 
-              unless not Process.alive?(pid) do
-                send(pid, {:remove_subscriber, pid})
-              end
-          end
+            {:ok, state}
 
-          {:ok, state}
+          _ ->
+            {:reply, {:close, 4004, "unknown_opcode"}, state}
+        end
 
-        _ ->
-          {:reply, {:close, 4004, "unknown_opcode"}, state}
-      end
+      _ ->
+        {:reply, {:close, 4006, "invalid_payload"}, state}
     end
   end
 
@@ -118,13 +137,15 @@ defmodule Lanyard.SocketHandler do
     {:reply, construct_socket_msg(state.compression, message), state}
   end
 
-  def terminate(_reason, _req, state) do
+  def terminate(_reason, _req, _state) do
     :ets.insert(
       :global_subscribers,
       {"subscribers", List.delete(get_global_subscriber_list(), self())}
     )
 
-    {:ok, state}
+    Lanyard.Metrics.Collector.dec(:gauge, :lanyard_connected_sessions)
+
+    :ok
   end
 
   def get_global_subscriber_list do
@@ -138,6 +159,8 @@ defmodule Lanyard.SocketHandler do
   end
 
   defp construct_socket_msg(compression, data) do
+    Lanyard.Metrics.Collector.inc(:counter, :lanyard_messages_outbound)
+
     case compression do
       :zlib ->
         data = data |> Poison.encode!()
